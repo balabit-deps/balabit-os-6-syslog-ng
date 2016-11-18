@@ -1,132 +1,151 @@
-========================
 syslog-ng Debian sources
 ========================
 
-These sources are managed in a special setup in Git (see
-debian/control, or debian/control.d/control.in in a fresh checkout)
-that supports multiple upstream and multiple debian versions. The
-debian packaging is kept separate from the rest of the sources, so
-that one can easily merge between the debian packaging branches,
-without having to worry about unintentionally pulling non-debian
-changes from upstream.
+This is the Debian packaging of syslog-ng. It is a non-trivial
+packaging, not for the faint of heart, but rest assured, every quirk,
+every strange solution is there for a reason, and this document is
+here to explain the details.
 
-For this reason, the debian branch (see the branch layout section
-later) uses a submodule to pull in the appropriate version of
-syslog-ng. Building from this setup is possible, it produces valid
-debian packages. However, for source packages, one needs a little bit
-more massaging, as we want to support using unmodified upstream
-tarballs too. This part will be explained in a section of its own.
+There were a number of goals that influenced how the packaging was set
+up, namely:
 
--------------
-Branch Layout
--------------
+ * The packaging should be independent and separate from the upstream
+   sources. We want the `debian/` directory to be copy-able into an
+   upstream git checkout, or to an upstream dist tarball, and still
+   work.
 
-There are two major branch families to note:
+   We want merges between packaging branches to be painless, to not
+   have to worry about accidentally merging upstream changes too.
 
- * upstream/mirror/${MAJOR_VERSION}: This is a mirror of the upstream
-   master branch of the appropriate major version of syslog-ng. No
-   changes are applied to it, ever.
- * packaging/debian/${MAJOR_VERSION}: Debian packaging for the
-   appropriate major version, not directly related to either upstream
-   or patched branches, but pulls in a snapshot of
-   patched/${MAJOR_VERSION} as a submodule.
+ * The packaging should be generic enough to work on most Debian and
+   derived distributions, provided they have recent enough
+   build-dependencies.
 
-The packaging/debian/${MAJOR_VERSION} branch has a submodule that
-points to the corresponding syslog-ng tree, whether patched or
-pristine upstream.
+ * We want a branch for each Debian (or Ubuntu) release, where the
+   package is actively maintained. This includes Debian *unstable* and
+   *experimental* too.
 
-Furthermore, a couple of other branches may appear and disappear over
-time, that are part of the normal development work flow:
+ * Running `git-buildpackage` from a freshly checked out git
+   repository should produce source and binary packages suitable for
+   the main archive.
 
- * feature/${MAJOR_VERSION}/${NAME}: Each feature developed is done on
-   a separate branch, and sent upstream as such. These can be picked
-   onto the appropriate patched branch.
- * hotfix/${MAJOR_VERSION}/${NAME}: Bugfixes and the like for the
-   appropriate version, that are also sent upstream. Similarly to
-   feature branches, there can be picked onto the appropriate patched
-   branch.
- * merge-queue/${MAJOR_VERSION}: Patched proposed for mergint into the
-   relevant major version, pending review.
- * sandbox/${MAJOR_VERSION}: Sandboxes for experimental patches
-   mostly. These branches are often rebased, and they should not be
-   relied upon.
+For these reasons, this repository contains the `debian/` directory
+only, which will be laid over the upstream sources using
+`git-buildpackage`. The branches are all prefixed with the vendor
+(`debian/` or `ubuntu/`), followed by the release (`unstable`,
+`experimental`, `jessie`, and so on). Any other branch that may be
+present is likely a temporary branch.
 
+Packaging quirks
+----------------
+
+Most of the quirks we do happen in `debian/rules`, and they're also
+documented there. If there is conflict between this document and
+`debian/rules`, the latter is to be trusted.
+
+### Maintainer scripts
+
+Both syslog-ng-core, and a few of the older modules have maintainer
+scripts, for various purposes.
+
+In the case of **syslog-ng-core**, the `postrm` takes care of
+disabling (on remove) or removing (on purge) the logrotate
+configuration files, and also removes the control socket and the
+persist file, along with the `/var/lib/syslog-ng` directory, if it is
+empty.
+
+The `preinst` for **syslog-ng-core** restores any disabled logrotate
+configs, and if upgrading from a version that had symlinked conffiles,
+removes those too, before unpacking the upgrade.
+
+And the last maintainer script of **syslog-ng-core**, the `prerm`
+stops the `syslog.socket` if using systemd, so that we do not get
+re-enabled by socket activation during remove.
+
+Some module packages, namely **syslog-ng-mod-json**,
+**syslog-ng-mod-sql**, and **syslog-ng-mod-mongodb** also have a
+`postinst`, which removes the old activation conffile that shipped
+with syslog-ng versions prior to 3.4
+
+### Platform-specific tweaks
+
+By default, console output shall be directed to the tenth TTY device.
+On GNU/Linux, this is `/dev/tty10`, while on GNU/kFreeBSD, it is
+`/dev/ttya`. We get around this by using a platform-specific
+configuration snippet, that declares a syslog-ng variable with the
+appropriate value.
+
+On kFreeBSD, we install one version, on Linux, another. This is done
+from debian/rules.
+
+This way, the main configuration file remains the same on all
+architectures, only this little snippet changes, which makes it easier
+to maintain the whole.
+
+### Shared library ABI versions
+
+Upstream builds a `libsyslog-ng-$MAJOR.so.$N` shared library, which we
+ship in `syslog-ng-core`, because it is not a general purpose library.
+We also want third party modules (like the ones in the Incubator) to
+not have overly strict dependencies on the syslog-ng version they were
+compiled against. Having to rebuild the Incubator on every syslog-ng
+upload would be a disaster.
+
+For this reason, `syslog-ng-core` provides
+`syslog-ng-abi-$MAJOR-$ABI`, where **$MAJOR** is the major version,
+and **$ABI** is the ABI version: the **$N** part of
+`libsyslog-ng-$MAJOR.so.$N`. Whenever upstream bumps the version, the
+**$ABI** variable in `debian/rules` needs to be bumped too.
+
+If upstream forgets to bump the version, but introduces an
+ABI-incompatible change, it should be bumped anyway, and dependent
+modules will need to be rebuilt.
+
+### Control variables
+
+We have three custom control variables, which are referenced by
+`debian/control`: **${sng:CoreModules}**, **${sng:Modules}** and
+**${sng:ABI}}**. The first two will be used for dependencies, and last
+one will be used to provide an ABI version.
+
+The `syslog-ng` meta package has to depend on core modules, because at
+some point in the future, they were part of the monolithic `syslog-ng`
+package, and for smooth upgrades, we need to keep all formerly
+installed modules installed. Being a meta package, it also recommends
+the other modules.
+
+The list of Core modules is a hard-coded list (**sql**, **mongodb**,
+**json**), but the optional modules are generated at build time, by
+looking at `debian/control` and finding all packages with names
+starting with `syslog-ng-mod-`.
+
+We use the `debian/tools/list-modules.sh` script to construct these
+lists for us, and in `debian/rules`, we override `dh_gencontrol` to
+pass these along, along with **${sng:ABI}**.
+
+The **${sng:ABI}** is used for module dependencies. To have a looser
+dependency for modules, so that third party (and Incubator) modules do
+not have to get recompiled for every single syslog-ng update, we track
+the ABI with a `Provides` field. Whenever the version of
+`libsyslog-ng.so` changes, the ABI version should be updated too.
+
+Building the package
 --------------------
-Development workflow
---------------------
 
-To update the package, the following workflow should be kept:
+The easiest way is to use `debian/rules get-orig-source` followed by
+`git-buildpackage`. That will fetch the latest upstream sources, and
+then build both binary and source packages.
 
-Upgrading to a new upstream version
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+If one wants to work with an unreleased version of syslog-ng, then
+copying the `debian/` directory over, replacing the original will
+allow one to use `dpkg-buildpackage -b` or `fakeroot debian/rules
+binary` to produce binary packages. Building source packages from this
+setup is not recommended.
 
-* Pull the upstream changes as-is onto the appropriate upstream
-  branch. (such as upstream/mirror/3.3)
-* If all patches were applied upstream, update the submodule on the
-  packaging branch (packaging/debian/3.3).
+ -- Gergely Nagy <algernon@madhouse-project.org>  Fri, 07 Nov 2014 08:44:36 +0100
 
-  If not, create a separate branch, and apply any necessary patches
-  there, and set the submodule to point there.
-* Run debian/tools/bootstrap.sh with selected flags (see below), and
-  make sure it did the right thing.
-
-  The bootstrap.sh tool generates debian/control, from
-  debian/control.d/control.in, and allows one to selectively enable or
-  disable features in a source package. As of this writing, the only
-  optional feature is "systemd".
-
-  If enabled (which is the default), libsystemd-dev and
-  dh-systemd will be added to Build-Depends. To disable the feature,
-  pass an empty string as an argument to the bootstrap script.
-
-  Once verified, commit the changes to git. The files generated by the
-  scripts are NOT stored in git, one is expected to bootstrap the
-  sources by running debian/tools/bootstrap.sh.
-
-Selectively applying upstream fixes
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-* Pull the upstream changes as-is onto the upstream/mirror branch.
-* cherry-pick the appropriate fixes to a separate branch.
-* Update the syslog-ng submodule of the debian packaging branch.
-
-Debian-specific changes
-~~~~~~~~~~~~~~~~~~~~~~~
-
-Debian packaging specific changes should directly go to the debian
-packaging branch.
-
------------------
-Building from git
------------------
-
-To build the package from git, one will first need to initialize it,
-by pulling in the appropriate submodules, and generating a few
-files. This can be accomplished by running the
-debian/tools/bootstrap.sh script.
-
----------------------
-Exporting the sources
----------------------
-
-The orig.tar.xz can be generated by debian/rules get-orig-source. The
-packaging does not use the upstream tarballs, as it is built directly
-from git.
-
-However, the tarball generated by get-orig-source (similarly to
-upstream packages) does not reside in a subdirectory, so one needs to
-do some extra work to make the tree ready for a sourceful build:
-export it so that debian/ is applied on top of the patched branch.
-
-Once done, the tree is ready to be built.
-
-With the above workflow, the patches on the patched branch will get
-flattened during build into a single debian/patches/debian-changes
-patch. If one wants to make modifications, that should be done in git,
-not with the exported sources.
-
-The debian/tools/export-source.sh tool automates the bulk of the
-above: it sets up a directory, where the debian/ dir is merged into
-the patched sources.
-
- -- Gergely Nagy <algernon@madhouse-project.org>, Tue,  2 Jul 2013 14:14:57 +0200
+<!--
+Local Variables:
+mode: markdown
+End:
+-->
